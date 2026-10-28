@@ -6,5 +6,7 @@
 *.key
 *.pem
 *.crt
+*.out
+*.test
 *.log
 .DS_Store

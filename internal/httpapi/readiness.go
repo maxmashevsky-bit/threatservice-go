@@ -17,9 +17,11 @@ var errReadinessPanic = errors.New("readiness check panicked")
 
 type readyFlight struct {
 	done chan struct{}
-	err  error
+	err  error // Published before done is closed; immutable afterwards.
 }
 
+// One bounded check is shared by all callers. It is independent of an
+// individual HTTP request: canceling a waiter must not cancel other probes.
 type readinessCache struct {
 	mu      sync.Mutex
 	expires time.Time

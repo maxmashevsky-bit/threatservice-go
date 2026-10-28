@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 )
 
+// decodeObject checks keys before decoding a DTO: encoding/json alone accepts
+// duplicate keys and matches Go struct fields without regard to case.
 func decodeObject(body []byte, allowed, required []string, dst any) error {
 	if !utf8.Valid(body) || !validSurrogates(body) {
 		return errors.New("JSON strings must contain valid Unicode")
@@ -65,6 +67,8 @@ func decodeObject(body []byte, allowed, required []string, dst any) error {
 	return nil
 }
 
+// Go replaces invalid UTF-16 escapes with U+FFFD. Reject them before decoding so
+// a client's string cannot silently change. Literal, valid U+FFFD is allowed.
 func validSurrogates(body []byte) bool {
 	inside := false
 	for i := 0; i < len(body); i++ {

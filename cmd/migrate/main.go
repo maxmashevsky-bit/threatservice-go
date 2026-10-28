@@ -1,3 +1,4 @@
+// Command migrate applies explicit, transactional schema changes.
 package main
 
 import (
@@ -82,6 +83,7 @@ func run(args []string, lookup func(string) string, output io.Writer) error {
 }
 
 func grantApp(ctx context.Context, pool *pgxpool.Pool, role string) error {
+	// Quote identifiers through the driver; never interpolate an untrusted role name.
 	quoted := pgx.Identifier{role}.Sanitize()
 	tx, err := pool.Begin(ctx)
 	if err != nil {

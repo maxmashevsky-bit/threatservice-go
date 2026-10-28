@@ -1,3 +1,4 @@
+// Package postgres stores current threat records in PostgreSQL.
 package postgres
 
 import (
@@ -12,6 +13,7 @@ import (
 	"threatservice/internal/threat"
 )
 
+// Repository bounds both waiting for a pooled connection and executing SQL.
 type Repository struct {
 	pool         *pgxpool.Pool
 	queryTimeout time.Duration
@@ -87,6 +89,8 @@ func (r *Repository) Replace(ctx context.Context, md5 string, input threat.Input
 }
 
 func queryError(ctx context.Context, operation string, err error) error {
+	// A server-acknowledged cancellation is a PostgreSQL error (57014), while a
+	// local timeout may wrap context.DeadlineExceeded. Preserve both causes.
 	if ctx.Err() != nil {
 		err = errors.Join(err, ctx.Err())
 	}
@@ -96,6 +100,7 @@ func queryError(ctx context.Context, operation string, err error) error {
 func scan(row pgx.Row) (threat.Threat, error) {
 	var result threat.Threat
 	var severity string
+	// Scan also consumes the command result and releases the pooled connection.
 	if err := row.Scan(&result.MD5, &result.Name, &result.Description,
 		&severity, &result.CreatedAt, &result.UpdatedAt); err != nil {
 		return threat.Threat{}, err

@@ -1,3 +1,4 @@
+// Package migrations embeds the versioned schema and applies it transactionally.
 package migrations
 
 import (
@@ -12,6 +13,8 @@ import (
 
 const Version int64 = 1
 
+// All runners for this service use the same transaction-scoped lock. Applying
+// migrations in different test schemas may serialize briefly, which is harmless.
 const migrationLock int64 = 0x544852454154
 
 //go:embed *.sql
@@ -22,6 +25,7 @@ type querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// Up applies pending migrations exactly once, including the version ledger.
 func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, false, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -54,6 +58,8 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	})
 }
 
+// Down removes the current schema and its data. The empty ledger remains so Up
+// can apply the migration again. Application shutdown must never call Down.
 func Down(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, false, func(tx pgx.Tx) error {
 		if err := check(ctx, tx); err != nil {
@@ -73,6 +79,8 @@ func Down(ctx context.Context, pool *pgxpool.Pool) error {
 	})
 }
 
+// Check is read-only and is safe for the restricted application role. That role
+// needs SELECT on schema_migrations in addition to its threat-table grants.
 func Check(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, true, func(tx pgx.Tx) error { return check(ctx, tx) })
 }
@@ -118,6 +126,7 @@ func withLock(ctx context.Context, pool *pgxpool.Pool, readOnly bool, action fun
 		return fmt.Errorf("begin migration: %w", err)
 	}
 	defer func() {
+		// Cleanup must still run after cancellation of the caller's context.
 		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = tx.Rollback(cleanup)
@@ -136,6 +145,8 @@ func withLock(ctx context.Context, pool *pgxpool.Pool, readOnly bool, action fun
 	if schema == nil {
 		return fmt.Errorf("search_path does not contain an accessible target schema")
 	}
+	// Never resolve half of the service's tables in a later search_path schema.
+	// Put pg_temp last so a temporary relation cannot shadow permanent tables.
 	path := pgx.Identifier{*schema}.Sanitize() + ", pg_temp"
 	if _, err := tx.Exec(ctx, `SELECT pg_catalog.set_config('search_path', $1, true)`, path); err != nil {
 		return fmt.Errorf("pin migration schema: %w", err)

@@ -1,3 +1,4 @@
+// Command server runs the threat information exchange HTTP service.
 package main
 
 import (
@@ -26,12 +27,14 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load()
 	if err != nil {
+		// config.Load returns only fixed validation messages, never input values.
 		logger.Error("invalid configuration", "operation", "load_configuration", "cause_category", "configuration", "error", err.Error())
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, cfg, logger); err != nil {
+		// run logs the classified underlying cause at the failure site.
 		logger.Error("service stopped")
 		os.Exit(1)
 	}
@@ -150,11 +153,15 @@ func closePoolBriefly(pool *pgxpool.Pool) {
 	}
 }
 
+// Error strings returned to main are fixed messages; the original error is only
+// inspected for allowlisted metadata at this point.
 func serverFailure(logger *slog.Logger, operation string, err error, message string) error {
 	diagnostic.Log(logger, "", operation, err)
 	return errors.New(message)
 }
 
+// net/http may embed untrusted protocol input in its formatted diagnostics.
+// Preserve the event without forwarding that already-formatted text.
 type safeTransportLog struct{ logger *slog.Logger }
 
 func (w safeTransportLog) Write(p []byte) (int, error) {
@@ -169,6 +176,8 @@ func databaseReady(ctx context.Context, pool *pgxpool.Pool, timeout time.Duratio
 	if err == nil {
 		err = migrations.Check(ctx, pool)
 	}
+	// An acknowledged cancel may be only PgError 57014. Preserve the shorter
+	// QUERY_TIMEOUT even when the outer readiness deadline has not expired.
 	if err != nil && ctx.Err() != nil {
 		err = errors.Join(err, ctx.Err())
 	}

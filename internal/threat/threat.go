@@ -1,3 +1,4 @@
+// Package threat defines the threat model and storage-independent business rules.
 package threat
 
 import (
@@ -9,6 +10,7 @@ import (
 	"unicode/utf8"
 )
 
+// Severity is a client-provided assessment, not a verdict computed by this service.
 type Severity string
 
 const (
@@ -24,10 +26,12 @@ var (
 	ErrAlreadyExists = errors.New("threat already exists")
 )
 
+// ValidationError identifies a bad client field without exposing storage errors.
 type ValidationError struct{ Field, Message string }
 
 func (e *ValidationError) Error() string { return fmt.Sprintf("%s: %s", e.Field, e.Message) }
 
+// Threat is the complete current state stored under a normalized MD5.
 type Threat struct {
 	MD5         string
 	Name        string
@@ -37,18 +41,21 @@ type Threat struct {
 	UpdatedAt   time.Time
 }
 
+// Input replaces all mutable fields. Transport defaults must be applied before use.
 type Input struct {
 	Name        string
 	Description string
 	Severity    Severity
 }
 
+// Repository implements atomic operations on current records.
 type Repository interface {
 	Create(context.Context, string, Input) (Threat, error)
 	GetByMD5(context.Context, string) (Threat, error)
 	Replace(context.Context, string, Input) (Threat, error)
 }
 
+// NormalizeMD5 validates the complete hash and canonicalizes its ASCII case.
 func NormalizeMD5(value string) (string, error) {
 	if len(value) != 32 {
 		return "", &ValidationError{"md5", "must contain exactly 32 hexadecimal characters"}
@@ -61,6 +68,7 @@ func NormalizeMD5(value string) (string, error) {
 	return strings.ToLower(value), nil
 }
 
+// ValidateInput deliberately preserves whitespace and Unicode normalization.
 func ValidateInput(input Input) error {
 	if !utf8.ValidString(input.Name) || strings.ContainsRune(input.Name, 0) || strings.TrimSpace(input.Name) == "" || utf8.RuneCountInString(input.Name) > 255 {
 		return &ValidationError{"name", "must contain 1 to 255 characters, must not be blank or contain NUL"}
@@ -76,6 +84,7 @@ func ValidateInput(input Input) error {
 	}
 }
 
+// Service validates each operation before delegating it to durable storage.
 type Service struct{ repo Repository }
 
 func NewService(repo Repository) *Service { return &Service{repo: repo} }
