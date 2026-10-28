@@ -56,6 +56,10 @@
 | --- | --- | --- |
 | Неверные тайм-ауты, NaN rate, порт, размер пула, token68 или переполнение WriteTimeout | Процесс отказывается стартовать; значения настроек не печатаются | `TestInvalidConfigurationDoesNotRevealValues`, `deploy-check` |
 | Неизвестный аргумент мигратора или down без защитной переменной | Отказ до соединения с БД; значения аргументов не раскрываются | `TestInvalidArgumentsFailBeforeDatabaseAccess`, `TestDestructiveGuardPrecedesDatabaseConnection` |
+| Неверный пароль мигратора | Код процесса 1; connect_database, authentication_failed и SQLSTATE 28P01 без DSN и пароля | `TestMigrationDiagnosticsAgainstPostgres`, `TestMigrationFailureRetainsOnlySafeMetadata` |
+| Несовместимая схема при status/up/down | check_schema и schema_mismatch; названия объектов не попадают в лог, схема автоматически не исправляется | `TestMigrationDiagnosticsAgainstPostgres` |
+| Runtime-роль не существует или небезопасна | grant_runtime_role и runtime_role_missing/runtime_role_unsafe; схема уже применена, имя роли не раскрывается | `TestRuntimeGrantsUseTargetSchemaAndRecoverAfterMissingRole`, `TestMigrationFailureRetainsOnlySafeMetadata` |
+| Ошибка SQL при применении миграции | apply_migration, категория postgresql и исходная SQLSTATE; Message/Detail/Hint и SQL-параметры не раскрываются | `TestMigrationDiagnosticsAgainstPostgres`, `TestMigrationFailureRetainsOnlySafeMetadata` |
 | Порт занят, DSN повреждён, PEM недоступен | Безопасная ошибка старта без DSN, пароля и путей к секретным файлам | `TestStartupFailuresReturnSafeErrors` |
 | SIGTERM при активной записи | При достаточном времени запрос заканчивается; при истечении shutdown deadline SQL отменяется, поздней записи нет | `TestServerDrainsOrCancelsActiveSQLWithinShutdownBudget` |
 | PostgreSQL недоступна | Liveness — `200`, readiness — `503`, запись — безопасный `500`. После запуска БД тот же процесс обслуживает запросы | `deploy-check` |
