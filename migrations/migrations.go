@@ -4,6 +4,7 @@ package migrations
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,25 @@ import (
 )
 
 const Version int64 = 1
+
+var ErrSchemaMismatch = errors.New("schema does not match the service migration")
+
+// CheckError marks validation failures without losing a driver error or SQLSTATE.
+type CheckError struct{ Err error }
+
+func (e *CheckError) Error() string { return e.Err.Error() }
+func (e *CheckError) Unwrap() error { return e.Err }
+
+func schemaCheck(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &CheckError{Err: err}
+}
+
+func incompatibleSchema(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrSchemaMismatch, fmt.Sprintf(format, args...))
+}
 
 // All runners for this service use the same transaction-scoped lock. Applying
 // migrations in different test schemas may serialize briefly, which is harmless.
@@ -36,13 +56,13 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		versions, err := readVersions(ctx, tx)
 		if err != nil {
-			return err
+			return schemaCheck(err)
 		}
 		if len(versions) == 1 && versions[0] == Version {
-			return checkSchema(ctx, tx)
+			return schemaCheck(checkSchema(ctx, tx))
 		}
 		if len(versions) != 0 {
-			return fmt.Errorf("unsupported migration versions: %v; expected empty or [%d]", versions, Version)
+			return schemaCheck(incompatibleSchema("unsupported migration versions: %v; expected empty or [%d]", versions, Version))
 		}
 		sql, err := files.ReadFile("001_threats.up.sql")
 		if err != nil {
@@ -54,7 +74,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, Version); err != nil {
 			return fmt.Errorf("record migration: %w", err)
 		}
-		return checkSchema(ctx, tx)
+		return schemaCheck(checkSchema(ctx, tx))
 	})
 }
 
@@ -63,7 +83,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 func Down(ctx context.Context, pool *pgxpool.Pool) error {
 	return withLock(ctx, pool, false, func(tx pgx.Tx) error {
 		if err := check(ctx, tx); err != nil {
-			return err
+			return schemaCheck(err)
 		}
 		sql, err := files.ReadFile("001_threats.down.sql")
 		if err != nil {
@@ -82,7 +102,7 @@ func Down(ctx context.Context, pool *pgxpool.Pool) error {
 // Check is read-only and is safe for the restricted application role. That role
 // needs SELECT on schema_migrations in addition to its threat-table grants.
 func Check(ctx context.Context, pool *pgxpool.Pool) error {
-	return withLock(ctx, pool, true, func(tx pgx.Tx) error { return check(ctx, tx) })
+	return withLock(ctx, pool, true, func(tx pgx.Tx) error { return schemaCheck(check(ctx, tx)) })
 }
 
 func check(ctx context.Context, q querier) error {
@@ -91,7 +111,7 @@ func check(ctx context.Context, q querier) error {
 		return err
 	}
 	if len(versions) != 1 || versions[0] != Version {
-		return fmt.Errorf("schema version mismatch: got %v, expected [%d]", versions, Version)
+		return incompatibleSchema("schema version mismatch: got %v, expected [%d]", versions, Version)
 	}
 	return checkSchema(ctx, q)
 }

@@ -2,8 +2,11 @@ package migrations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type column struct {
@@ -47,7 +50,7 @@ func checkSchema(ctx context.Context, q querier) error {
 		return fmt.Errorf("inspect threat constraints and privileges: %w", err)
 	}
 	if !validKey || !validCollation || hasTriggers {
-		return fmt.Errorf("threats primary key, MD5 collation or triggers differ from migration version %d", Version)
+		return incompatibleSchema("threats primary key, MD5 collation or triggers differ from migration version %d", Version)
 	}
 	if !canRead || !canInsert || !canUpdate {
 		return fmt.Errorf("current role requires SELECT, INSERT and UPDATE on threats")
@@ -78,7 +81,7 @@ func checkSchema(ctx context.Context, q querier) error {
 		want, ok := expected[name]
 		slices.Sort(keys)
 		if !ok || !validated || !slices.Equal(keys, want) {
-			return fmt.Errorf("constraint %s differs from migration version %d", name, Version)
+			return incompatibleSchema("constraint %s differs from migration version %d", name, Version)
 		}
 		delete(expected, name)
 	}
@@ -86,7 +89,7 @@ func checkSchema(ctx context.Context, q querier) error {
 		return fmt.Errorf("read threat checks: %w", err)
 	}
 	if len(expected) != 0 {
-		return fmt.Errorf("threats is missing required check constraints")
+		return incompatibleSchema("threats is missing required check constraints")
 	}
 	return nil
 }
@@ -100,10 +103,13 @@ func checkTable(ctx context.Context, q querier, name string, expected []column) 
 		WHERE n.nspname = pg_catalog.current_schema() AND c.relname = $1`, name).
 		Scan(&oid, &kind, &persistence, &rls)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, incompatibleSchema("%s is missing in the target schema", name)
+		}
 		return 0, fmt.Errorf("find %s in the target schema: %w", name, err)
 	}
 	if kind != "r" || persistence != "p" || rls {
-		return 0, fmt.Errorf("%s must be a permanent ordinary table without row-level security", name)
+		return 0, incompatibleSchema("%s must be a permanent ordinary table without row-level security", name)
 	}
 	rows, err := q.Query(ctx, `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
 		a.attnotnull, COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
@@ -122,7 +128,7 @@ func checkTable(ctx context.Context, q querier, name string, expected []column) 
 			return 0, fmt.Errorf("read %s columns: %w", name, err)
 		}
 		if i >= len(expected) || actual != expected[i] || !notNull {
-			return 0, fmt.Errorf("%s columns differ from migration version %d", name, Version)
+			return 0, incompatibleSchema("%s columns differ from migration version %d", name, Version)
 		}
 		i++
 	}
@@ -130,7 +136,7 @@ func checkTable(ctx context.Context, q querier, name string, expected []column) 
 		return 0, fmt.Errorf("read %s columns: %w", name, err)
 	}
 	if i != len(expected) {
-		return 0, fmt.Errorf("%s is missing required columns", name)
+		return 0, incompatibleSchema("%s is missing required columns", name)
 	}
 	return oid, nil
 }

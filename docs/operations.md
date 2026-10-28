@@ -21,6 +21,19 @@ docker compose down
 
 Без Docker создайте роли и БД заранее, выполните `go run ./cmd/migrate -app-role=threat_app up` с DSN владельца, затем `go run ./cmd/server` с DSN runtime-роли.
 
+Например, для заранее созданной локальной БД `threats` на порту 5432 и ролей с паролями из `.env.example`:
+
+```sh
+export DATABASE_URL='postgres://threat_owner@127.0.0.1:5432/threats?sslmode=disable'
+export PGPASSWORD='dev-owner-change-me'
+go run ./cmd/migrate -app-role=threat_app up
+export DATABASE_URL='postgres://threat_app@127.0.0.1:5432/threats?sslmode=disable'
+export PGPASSWORD='dev-app-change-me'
+go run ./cmd/server
+```
+
+Compose не публикует порт PostgreSQL; этот пример предполагает отдельную локальную БД. Сборка через `make build` создаёт `bin/server` и `bin/migrate`; для проверки SIGTERM запускайте собранный `bin/server`, чтобы сигнал пришёл самому серверу, а не оболочке `go run`.
+
 ## TLS и остановка
 
 Смонтируйте PEM-файлы read-only, доступные UID 65532. Например, дополнительный `compose.tls.yaml`:
@@ -67,6 +80,10 @@ JSON-логи пишутся в stdout. HTTP-ответ содержит сер�
 Нераспознанные ошибки не классифицируются по тексту. Не логируются err.Error(), поля Message/Detail/Hint/Where/InternalQuery PostgreSQL, имена таблиц и ограничений, DSN, параметры SQL, заголовки авторизации и тела запросов. Исключение — фиксированные сообщения проверки конфигурации, не содержащие значений переменных. Стек паники включает до 64 символических кадров: функции, исходные файлы и строки; значения аргументов и panic payload не записываются. Паника внутри общей readiness-проверки также публикует 503 и освобождает ожидающих.
 
 При старте operation показывает этап: parse_database_config, initialize_database_pool, connect_database, check_schema, resolve_schema, load_tls или listen_http. Здесь ещё нет HTTP-запроса и request_id. Причина классифицируется до замены ошибки безопасным сообщением. Сообщения net/http до создания запроса могут содержать чужой протокольный ввод: они заменяются событием http_transport без исходного текста. Это ограничивает подробность TLS/transport-диагностики, сохраняя конфиденциальность.
+
+Мигратор пишет одно ERROR-событие при неудаче и завершает процесс с кодом 1. Поле operation различает parse_database_config, connect_database, apply_migration, revert_migration, check_schema и grant_runtime_role; для ошибок CLI и вывода используются validate_arguments и write_output. Проверка схемы внутри `up` или `down` также отмечается как check_schema. Причина классифицируется через `diagnostic.Cause`; дополнительно распознаются authentication_failed (SQLSTATE класса 28), schema_mismatch, runtime_role_missing и runtime_role_unsafe. Отмена и deadline сохраняют приоритет перед этими категориями.
+
+Пример неверного пароля без его значения: `{"level":"ERROR","msg":"could not connect to database; check credentials and availability","operation":"connect_database","cause_category":"authentication_failed","sqlstate":"28P01"}`. У несовместимой структуры категория schema_mismatch, у отсутствующей роли — runtime_role_missing; SQLSTATE отсутствует, если это локальная проверка, а не ответ PostgreSQL. Названия схем, колонок и роли не включаются в событие. После grant_runtime_role схема уже зафиксирована: создайте безопасную роль и повторите `up`. После ошибки применения SQL транзакция миграции откатывается, но при потере сети возле COMMIT сначала проверьте `status`, прежде чем делать вывод о результате.
 
 ## Проверки
 
