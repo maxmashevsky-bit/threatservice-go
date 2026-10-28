@@ -1,0 +1,539 @@
+openapi: 3.0.3
+info:
+  title: Information Exchange Service
+  version: 1.1.0
+  description: |
+    Сервис хранения и обмена уже известными сведениями об угрозах по MD5.
+    Сервис не сканирует файлы и не подтверждает достоверность данных клиента.
+    Ответы бизнес-операций содержат шесть полей. Даты — UTC с суффиксом Z.
+    Все ответы приложения содержат Cache-Control: no-store и X-Request-ID.
+    Bearer-аутентификация и общий лимит запросов на экземпляр включаются
+    конфигурацией; при выключенной аутентификации токен не требуется.
+    Приоритет проверок: маршрут, метод, MD5 пути, доступ, rate limit,
+    Content-Type/Encoding, размер, Unicode/JSON, поля, бизнес-операция.
+    HEAD отклоняется с 405 и Allow; тело ответа HEAD всегда пустое.
+    Повторные слеши, лишние сегменты и dot-сегменты не перенаправляются.
+    MD5 пути декодируется один раз; затем проверяется его формат.
+    Непарные UTF-16 surrogate escapes запрещены; дубли ключей проверяются
+    после JSON-декодирования имён.
+    Query-параметры не определены и игнорируются.
+servers:
+  - url: http://localhost:8080
+    description: Локальный профиль без аутентификации
+security:
+  - {}
+  - BearerAuth: []
+tags:
+  - name: threats
+    description: Текущие сведения об угрозах
+paths:
+  /health/live:
+    get:
+      operationId: liveness
+      summary: Проверить доступность процесса
+      security: []
+      description: Не использует БД; не требует токена и не учитывается лимитером.
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOK'
+  /health/ready:
+    get:
+      operationId: readiness
+      summary: Проверить готовность обслуживать запросы
+      security: []
+      description: |
+        Проверяет БД в пределах deadline; не требует токена.
+        Отдельный лимит экземпляра — 1 запрос/с с burst 2; при превышении
+        возвращается 429 с Retry-After 1 без обращения к БД.
+        Проверка не расходует лимит бизнес-API. /health/live не ограничивается.
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOK'
+        '503':
+          $ref: '#/components/responses/NotReady'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /info:
+    post:
+      tags: [threats]
+      operationId: createThreat
+      summary: Создать запись об угрозе
+      description: |
+        Создаёт новую запись. MD5 нормализуется в нижний регистр.
+        Повторное создание, включая запрос с теми же данными, возвращает 409.
+        Пропущенные description и severity получают пустую строку и unknown.
+        Content-Type должен быть application/json; charset=utf-8 допустим.
+        Тело — один JSON-объект не более 65536 байт. Null, лишние поля,
+        повторные ключи, имена полей другого регистра и лишний JSON запрещены.
+        Сжатие тела не поддерживается; Content-Encoding identity допустим.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatCreateRequest'
+            examples:
+              minimal:
+                summary: Минимальное тело исходного контракта
+                value:
+                  md5: '0123456789abcdef0123456789abcdef'
+                  name: Trojan.Win32.Generic
+              full:
+                summary: Дополненная модель
+                value:
+                  md5: '0123456789ABCDEF0123456789ABCDEF'
+                  name: Trojan.Win32.Generic
+                  description: Получает команды с удалённого узла
+                  severity: high
+      responses:
+        '201':
+          description: Запись сохранена
+          headers:
+            Location:
+              description: Относительный путь к созданной записи с MD5 в нижнем регистре
+              schema:
+                type: string
+                pattern: '^/info/[a-f0-9]{32}$'
+              example: /info/0123456789abcdef0123456789abcdef
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreatResponse'
+              example:
+                md5: '0123456789abcdef0123456789abcdef'
+                name: Trojan.Win32.Generic
+                description: Получает команды с удалённого узла
+                severity: high
+                created_at: '2026-10-28T11:00:00Z'
+                updated_at: '2026-10-28T11:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        default:
+          $ref: '#/components/responses/RoutingError'
+  /info/{md5}:
+    parameters:
+      - $ref: '#/components/parameters/MD5'
+    get:
+      tags: [threats]
+      operationId: getInfoByMd5
+      summary: Получить сведения об угрозе по MD5
+      description: |
+        Возвращает текущую запись. MD5 в верхнем регистре допустим.
+        Ответ содержит MD5 в нижнем регистре. Отсутствие записи не является
+        подтверждением безопасности файла. Чтение не меняет даты.
+        Тело GET не используется.
+      responses:
+        '200':
+          $ref: '#/components/responses/ThreatOK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        default:
+          $ref: '#/components/responses/RoutingError'
+    put:
+      tags: [threats]
+      operationId: updateThreat
+      summary: Полностью заменить сведения о существующей угрозе
+      description: |
+        Заменяет все изменяемые поля; отсутствие записи даёт 404.
+        Пропущенные description и severity сбрасываются в пустую строку и unknown.
+        MD5 и даты через тело передавать нельзя. created_at не меняется.
+        updated_at меняется только при изменении сохранённых значений.
+        Повтор одинакового PUT сохраняет updated_at.
+        Конкурентные PUT сериализуются блокировкой строки БД; более поздняя
+        замена может затереть предыдущую. Контроля версии в первой версии нет.
+        Content-Type должен быть application/json; charset=utf-8 допустим.
+        Тело — один JSON-объект не более 65536 байт. Null, лишние поля,
+        повторные ключи, имена полей другого регистра и лишний JSON запрещены.
+        Сжатие тела не поддерживается; Content-Encoding identity допустим.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatUpdateRequest'
+            examples:
+              replacement:
+                summary: Сброс дополнительных полей при полной замене
+                value:
+                  name: Trojan.Win32.Updated
+      responses:
+        '200':
+          description: Существующая запись заменена
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreatResponse'
+              example:
+                md5: '0123456789abcdef0123456789abcdef'
+                name: Trojan.Win32.Updated
+                description: ''
+                severity: unknown
+                created_at: '2026-10-28T11:00:00Z'
+                updated_at: '2026-10-28T11:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        default:
+          $ref: '#/components/responses/RoutingError'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Общий секрет из конфигурации; при выключенной защите не нужен.
+  parameters:
+    MD5:
+      name: md5
+      in: path
+      required: true
+      description: MD5 файла — 32 шестнадцатеричных символа; пробелы недопустимы
+      schema:
+        $ref: '#/components/schemas/MD5Input'
+      example: '0123456789abcdef0123456789abcdef'
+  headers:
+    NoStore:
+      description: Ответ приложения не должен сохраняться HTTP-кешами
+      schema:
+        type: string
+        enum: [no-store]
+    RequestID:
+      description: Идентификатор запроса, сформированный сервером и включённый в лог
+      schema:
+        type: string
+      example: 8a91c6d34b9e46b0a0fdb84f1c7db66a
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    MD5Input:
+      type: string
+      minLength: 32
+      maxLength: 32
+      pattern: '^[a-fA-F0-9]{32}$'
+      description: Принимает оба регистра; после проверки приводится к нижнему
+      example: '0123456789abcdef0123456789abcdef'
+    ThreatName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: |
+        Название, переданное клиентом. Длина в кодовых точках Unicode.
+        Строка только из пробелов по strings.TrimSpace и U+0000 запрещены.
+        Пробелы по краям сохраняются; регистр и содержимое не нормализуются.
+      example: Trojan.Win32.Generic
+    ThreatDescription:
+      type: string
+      maxLength: 4000
+      default: ''
+      description: Свободный текст до 4000 кодовых точек Unicode без U+0000
+      example: Получает команды с удалённого узла
+    Severity:
+      type: string
+      enum: [unknown, low, medium, high, critical]
+      default: unknown
+      description: Оценка клиента; unknown не означает безопасный файл
+      example: high
+    ThreatCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [md5, name]
+      properties:
+        md5:
+          $ref: '#/components/schemas/MD5Input'
+        name:
+          $ref: '#/components/schemas/ThreatName'
+        description:
+          $ref: '#/components/schemas/ThreatDescription'
+        severity:
+          $ref: '#/components/schemas/Severity'
+    ThreatUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/ThreatName'
+        description:
+          $ref: '#/components/schemas/ThreatDescription'
+        severity:
+          $ref: '#/components/schemas/Severity'
+    ThreatResponse:
+      type: object
+      additionalProperties: false
+      required: [md5, name, description, severity, created_at, updated_at]
+      properties:
+        md5:
+          type: string
+          minLength: 32
+          maxLength: 32
+          pattern: '^[a-f0-9]{32}$'
+          readOnly: true
+          example: '0123456789abcdef0123456789abcdef'
+        name:
+          $ref: '#/components/schemas/ThreatName'
+        description:
+          $ref: '#/components/schemas/ThreatDescription'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Время создания, UTC, суффикс Z; точность до микросекунд
+          example: '2026-10-28T11:00:00Z'
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Не раньше created_at; повтор одинакового PUT не меняет дату
+          example: '2026-10-28T11:00:00Z'
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Краткое описание; алгоритм клиента опирается на HTTP-статус
+          example: Threat not found
+        details:
+          type: string
+          description: Безопасное уточнение ошибки клиента; для 500 отсутствует
+          example: No threat with the specified MD5 found
+  responses:
+    HealthOK:
+      description: Процесс доступен либо сервис готов
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HealthResponse'
+          example:
+            status: ok
+    NotReady:
+      description: БД временно недоступна; внутренние сведения не раскрываются
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Service not ready
+    Unauthorized:
+      description: Включена защита, но Bearer-токен отсутствует или неверен
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            enum: [Bearer]
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Unauthorized
+    RateLimited:
+      description: Превышен общий лимит запросов на экземпляр приложения
+      headers:
+        Retry-After:
+          description: Минимальная задержка повторной попытки, целые секунды
+          schema:
+            type: integer
+            minimum: 1
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Rate limit exceeded
+    ThreatOK:
+      description: Текущая запись об угрозе
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ThreatResponse'
+          example:
+            md5: '0123456789abcdef0123456789abcdef'
+            name: Trojan.Win32.Generic
+            description: Получает команды с удалённого узла
+            severity: high
+            created_at: '2026-10-28T11:00:00Z'
+            updated_at: '2026-10-28T11:00:00Z'
+    BadRequest:
+      description: Некорректный MD5, JSON, поле или значение; данные не изменены
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Invalid request
+            details: name must contain 1 to 255 characters and must not be blank
+    NotFound:
+      description: Запись с валидным MD5 отсутствует
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Threat not found
+            details: No threat with the specified MD5 found
+    Conflict:
+      description: MD5 уже существует; сохранённые данные не изменены
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Threat already exists
+    BodyTooLarge:
+      description: Тело больше 65536 байт
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Request body too large
+    UnsupportedMediaType:
+      description: Отсутствует или недопустим Content-Type либо Content-Encoding
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Unsupported media type
+    InternalError:
+      description: |
+        Внутренняя ошибка, недоступная БД или внутренний deadline.
+        Details, SQL, DSN, пароли и стек в ответе не допускаются.
+        Ошибка не доказывает отсутствие фиксации; состояние проверяется GET.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Internal server error
+    RoutingError:
+      description: |
+        Общие ошибки маршрутизации приложения: 404 Route not found или
+        405 Method not allowed. Для 405 заголовок Allow обязателен:
+        POST на /info; GET, PUT на /info/{md5}. HEAD и OPTIONS не поддерживаются.
+        На HEAD ответ всегда без тела.
+        Неизвестный путь и завершающий слеш дают 404 без редиректа.
+        Транспортные ошибки до принятия HTTP-запроса могут не иметь JSON-тела.
+      headers:
+        Allow:
+          description: Обязателен только для 405; допустимые методы маршрута
+          schema:
+            type: string
+          example: GET, PUT
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            route:
+              value:
+                message: Route not found
+            method:
+              value:
+                message: Method not allowed

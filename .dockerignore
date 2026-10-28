@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+bin
+coverage*
+*.out
+*.test
+*.log
+certs
+*.key
+*.pem
+*.crt
+.DS_Store

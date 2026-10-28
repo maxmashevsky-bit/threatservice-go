@@ -1,0 +1,12 @@
+/.env
+/.env.*
+!/.env.example
+/bin/
+/certs/
+*.key
+*.pem
+*.crt
+*.out
+*.test
+*.log
+.DS_Store
