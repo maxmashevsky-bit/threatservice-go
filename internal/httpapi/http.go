@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/time/rate"
 	"threatservice/api"
+	"threatservice/internal/diagnostic"
 	"threatservice/internal/threat"
 )
 
@@ -42,15 +43,16 @@ type Options struct {
 	BearerToken    string
 	RateLimitRPS   float64
 	RateLimitBurst int
-	Ready          func(context.Context) error
+	// Ready must honor its context, including while waiting for a pool connection.
+	Ready func(context.Context) error
 }
 
 type handler struct {
-	service          Service
-	options          Options
-	tokenHash        [32]byte
-	limiter          *rate.Limiter
-	readinessLimiter *rate.Limiter
+	service   Service
+	options   Options
+	tokenHash [32]byte
+	limiter   *rate.Limiter
+	readiness readinessCache
 }
 
 // New returns an HTTP handler. It deliberately avoids ServeMux's implicit HEAD
@@ -65,7 +67,7 @@ func New(service Service, options Options) http.Handler {
 	if options.MaxBodyBytes <= 0 {
 		options.MaxBodyBytes = 65536
 	}
-	h := &handler{service: service, options: options, tokenHash: sha256.Sum256([]byte(options.BearerToken)), readinessLimiter: rate.NewLimiter(1, 2)}
+	h := &handler{service: service, options: options, tokenHash: sha256.Sum256([]byte(options.BearerToken))}
 	if options.RateLimitRPS > 0 {
 		burst := options.RateLimitBurst
 		if burst <= 0 {
@@ -85,6 +87,21 @@ type responseState struct {
 	route      string
 	errorClass string
 	head       bool
+	logger     *slog.Logger
+	requestID  string
+	operation  string
+}
+
+func (w *responseState) internalError(err error, operation string) {
+	if operation == "" {
+		operation = w.operation
+	}
+	if errors.Is(err, errReadinessPanic) {
+		w.errorClass = "panic"
+		w.logger.Error("operation failed", "request_id", w.requestID, "operation", operation, "cause_category", "panic")
+		return
+	}
+	w.errorClass = diagnostic.Log(w.logger, w.requestID, operation, err)
 }
 
 func (w *responseState) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -107,8 +124,9 @@ func (w *responseState) Write(body []byte) (int, error) {
 
 func (h *handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	w := &responseState{ResponseWriter: raw, route: "unknown", head: r.Method == http.MethodHead}
 	id := requestID()
+	w := &responseState{ResponseWriter: raw, route: "unknown", head: r.Method == http.MethodHead,
+		logger: h.options.Logger, requestID: id, operation: "route_request"}
 	w.Header().Set("X-Request-ID", id)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
@@ -118,6 +136,8 @@ func (h *handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			w.errorClass = "panic"
+			h.options.Logger.Error("request panicked", "request_id", id, "operation", w.operation,
+				"cause_category", "panic", "stack", diagnostic.PanicStack())
 			if w.status == 0 {
 				writeError(w, 500, "Internal server error", "")
 			}
@@ -126,13 +146,14 @@ func (h *handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		h.options.Logger.Info("request completed", "request_id", id, "method", r.Method, "route", w.route, "status", status, "duration_ms", time.Since(started).Milliseconds(), "error_class", w.errorClass)
+		h.options.Logger.Info("request completed", "request_id", id, "method", r.Method, "route", w.route, "operation", w.operation, "status", status, "duration_ms", time.Since(started).Milliseconds(), "error_class", w.errorClass)
 	}()
 	if deadline, ok := ctx.Deadline(); ok {
 		// Bound unread bodies even when routing, authorization or media-type
 		// validation rejects a request before readBody. HTTP/1 may otherwise
 		// drain the unread body while trying to send that error response.
 		if err := http.NewResponseController(w).SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			w.internalError(err, "set_read_deadline")
 			writeError(w, 500, "Internal server error", "")
 			return
 		}
@@ -148,14 +169,12 @@ func (h *handler) serve(w *responseState, r *http.Request) {
 			methodError(w, "GET")
 			return
 		}
-		if path == "/health/ready" && !h.readinessLimiter.Allow() {
-			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, "Rate limit exceeded", "")
-			return
-		}
-		if path == "/health/ready" && h.options.Ready != nil {
-			if err := h.options.Ready(r.Context()); err != nil {
-				w.errorClass = "not_ready"
+		w.operation = "liveness"
+		if path == "/health/ready" {
+			w.operation = "readiness"
+			timeout := min(readinessTimeout, h.options.RequestTimeout)
+			if err := h.readiness.check(r.Context(), timeout, h.options.Ready, h.options.Logger, w.requestID); err != nil {
+				w.internalError(err, "")
 				writeError(w, http.StatusServiceUnavailable, "Service not ready", "")
 				return
 			}
@@ -167,6 +186,7 @@ func (h *handler) serve(w *responseState, r *http.Request) {
 	collection := path == "/info"
 	if collection {
 		w.route = "/info"
+		w.operation = "create_threat"
 		if r.Method != http.MethodPost {
 			methodError(w, "POST")
 			return
@@ -178,6 +198,10 @@ func (h *handler) serve(w *responseState, r *http.Request) {
 			return
 		}
 		w.route = "/info/{md5}"
+		w.operation = "get_threat"
+		if r.Method == http.MethodPut {
+			w.operation = "replace_threat"
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodPut {
 			methodError(w, "GET, PUT")
 			return
@@ -316,6 +340,7 @@ func (h *handler) readBody(w *responseState, r *http.Request) ([]byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.options.MaxBodyBytes+1))
 	if err != nil {
 		if r.Context().Err() != nil {
+			w.internalError(r.Context().Err(), "read_body")
 			writeError(w, 500, "Internal server error", "")
 		} else {
 			writeError(w, 400, "Invalid request", "could not read request body")
@@ -339,6 +364,7 @@ func handleError(w *responseState, err error) {
 	case errors.Is(err, threat.ErrAlreadyExists):
 		writeError(w, 409, "Threat already exists", "")
 	default:
+		w.internalError(err, "")
 		writeError(w, 500, "Internal server error", "")
 	}
 }
@@ -364,10 +390,12 @@ func writeJSON(w *responseState, status int, value any) {
 	if err != nil {
 		body = []byte(`{"message":"Internal server error"}`)
 		status = 500
-		w.errorClass = "serialization"
+		w.internalError(err, "serialize_response")
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(append(body, '\n'))
+	if _, err := w.Write(append(body, '\n')); err != nil {
+		w.internalError(err, "write_response")
+	}
 }
 
 func requestID() string {

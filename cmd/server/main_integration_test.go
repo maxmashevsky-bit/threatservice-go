@@ -3,14 +3,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -20,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"threatservice/internal/config"
+	"threatservice/internal/httpapi"
 	"threatservice/internal/postgres"
 	"threatservice/internal/threat"
 	"threatservice/migrations"
@@ -244,7 +248,6 @@ func TestServerDrainsOrCancelsActiveSQLWithinShutdownBudget(t *testing.T) {
 
 func TestStartupFailuresReturnSafeErrors(t *testing.T) {
 	_, cfg, _ := lifecycleDatabase(t)
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -263,10 +266,78 @@ func TestStartupFailuresReturnSafeErrors(t *testing.T) {
 			change(&c)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			err := run(ctx, c, logger)
-			if err == nil || strings.Contains(err.Error(), "SECRET_SENTINEL") {
-				t.Fatalf("unsafe startup result: %v", err)
+			var logs bytes.Buffer
+			err := run(ctx, c, slog.New(slog.NewJSONHandler(&logs, nil)))
+			if err == nil || strings.Contains(err.Error(), "SECRET_SENTINEL") || strings.Contains(logs.String(), "SECRET_SENTINEL") {
+				t.Fatalf("unsafe startup result or log")
+			}
+			var entry map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"occupied address": "listen_http", "invalid certificate": "load_tls", "invalid dsn": "parse_database_config"}[name]
+			if entry["level"] != "ERROR" || entry["operation"] != want || entry["cause_category"] == "" {
+				t.Fatalf("missing startup phase: %v", entry)
 			}
 		})
+	}
+}
+
+func TestStartupSchemaFailurePreservesSQLState(t *testing.T) {
+	pool, cfg, _ := lifecycleDatabase(t)
+	if _, err := pool.Exec(context.Background(), `DROP TABLE schema_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := run(ctx, cfg, slog.New(slog.NewJSONHandler(&logs, nil))); err == nil {
+		t.Fatal("server accepted missing ledger")
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["operation"] != "check_schema" || entry["cause_category"] != "postgresql" || entry["sqlstate"] != "42P01" {
+		t.Fatalf("schema cause lost: %v", entry)
+	}
+	if strings.Contains(logs.String(), "SELECT") || strings.Contains(logs.String(), cfg.DatabaseURL) {
+		t.Fatal("startup leaked SQL or DSN")
+	}
+}
+
+func TestReadinessLogsShorterQueryDeadline(t *testing.T) {
+	pool, _, _ := lifecycleDatabase(t)
+	ctx := context.Background()
+	locker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Rollback(ctx)
+	if _, err := locker.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(0x544852454154)); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	h := httpapi.New(nil, httpapi.Options{
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), RequestTimeout: 3 * time.Second,
+		Ready: func(ctx context.Context) error { return databaseReady(ctx, pool, 40*time.Millisecond) },
+	})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/health/ready", nil))
+	if w.Code != 503 {
+		t.Fatalf("blocked readiness=%d", w.Code)
+	}
+	var entry map[string]any
+	if err := json.NewDecoder(bytes.NewReader(logs.Bytes())).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["cause_category"] != "deadline_exceeded" || entry["sqlstate"] != "57014" || entry["request_id"] != w.Header().Get("X-Request-ID") {
+		t.Fatalf("shorter query deadline lost: %v", entry)
+	}
+	if err := locker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := databaseReady(ctx, pool, time.Second); err != nil {
+		t.Fatalf("readiness did not recover: %v", err)
 	}
 }

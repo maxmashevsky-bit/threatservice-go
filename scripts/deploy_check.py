@@ -2,6 +2,7 @@
 """Exercise a disposable Docker deployment without touching existing projects."""
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -124,6 +125,10 @@ def main():
         port = compose("port", "app", "8080").stdout.strip()
         base = "http://" + port
         ready(base)
+        with ThreadPoolExecutor(max_workers=12) as probes:
+            results = list(probes.map(lambda _: http(base, "GET", "/health/ready"), range(40)))
+        check(all(value == {"status": "ok"} for value in results), "concurrent readiness probes rejected a healthy service")
+        print("Concurrent readiness probes succeed without 429")
         md5 = hashlib.md5(os.urandom(32)).hexdigest()
         created = http(base, "POST", "/info", 201, {"md5": md5, "name": "Deployment.Check"})
         compose("up", "--build", "-d")

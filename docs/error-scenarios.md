@@ -21,8 +21,12 @@
 | Большой неверный заголовок авторизации или путь с множеством сегментов | Отказ без создания массива под каждое слово/сегмент; регрессионный предел аллокаций проверяется на фиксированных входах | `TestLargeRejectedInputsDoNotAmplifyAllocations` |
 | Нет Bearer или токен неверен | `401` с WWW-Authenticate, квота бизнес-запросов не расходуется | `TestOptionalAuthenticationRateLimitAndHealth`, `deploy-check` |
 | Исчерпана квота | `429` с Retry-After; отклонённый запрос не резервирует будущую квоту | `TestOptionalAuthenticationRateLimitAndHealth` |
-| Частые открытые readiness-пробы | После burst 2 действует 1 RPS; отдельный `429`. Бизнес-квота независима, liveness не ограничен | `TestReadinessHasAnIndependentBoundedLimiter` |
-| Panic или внутренняя ошибка | Безопасный `500`; токен, DSN, тело и panic не раскрываются в ответе или прикладном логе | `TestRecoveryAndLogsAreSafe`, `TestRepositoryErrorsAreMappedWithoutLeaks` |
+| Частые открытые readiness-пробы | Кеш на 1 секунду и одна общая проверка; ответы 200/503 без 429 от частоты опроса. Бизнес-квота независима, liveness не обращается к БД | `TestReadinessCacheIsIndependentOfBusinessLimiter`, `TestConcurrentReadinessProbesShareOneCheck` |
+| Panic или внутренняя ошибка | Безопасный `500`; ERROR-лог сохраняет категорию, request_id и SQLSTATE, для паники — символический стек. Значения секретов и panic payload не раскрываются | `TestRecoveryAndLogsAreSafe`, `TestUnexpectedErrorsHaveCorrelatedSafeDiagnostics`, `TestRepositoryErrorsAreMappedWithoutLeaks` |
+| Кеш готовности устарел; БД отказала или восстановилась | После TTL выполняется новая проверка, старый успех не используется бесконечно, ошибка также кешируется | `TestReadinessExpiresSuccessAndFailureThenRecovers` |
+| Ожидающий readiness-запрос отменён или истёк | Его ожидание прекращается, общая проверка остаётся доступной другим запросам | `TestCanceledReadinessWaitersDoNotCancelSharedCheck` |
+| Deadline или паника readiness-проверки | 503, опубликованный результат и снятый признак in-flight; следующий цикл может восстановиться | `TestReadinessCheckHasItsOwnDeadline`, `TestReadinessPanicPublishesFailureAndStack` |
+| Расхождение ручного HTTP с OpenAPI | Проверяются статус, тип, обязательные заголовки и JSON для POST/GET/PUT; мутации ответа обнаруживаются | `TestHTTPContractAgainstOpenAPI`, `TestContractValidatorDetectsResponseRegressions` |
 
 ## Записи, транзакции и схема
 
@@ -38,11 +42,11 @@
 | Повторные отмены на одном backend PostgreSQL | Пять циклов отмены/повторного использования проходят без отмены следующего запроса и без обязательной замены здорового соединения | `TestCanceledQueryDoesNotCancelNextUseOfSameConnection` |
 | Ошибка или одновременный запуск миграций | Ошибочная транзакция не оставляет версию; конкурентное применение выполняется один раз; down/up обратимы | `TestFailedMigrationDoesNotRecordVersion`, `TestConcurrentMigrationsApplyOnce`, `TestMigrationsAreVersionedAndReversible` |
 | Неверные значения внесены напрямую в БД | Ограничения PostgreSQL отклоняют проверяемые строки | `TestDatabaseConstraintsRejectInvalidRows` |
-| Версия есть, но схема изменилась | Check и повторный up завершаются ошибкой; автоматического удаления или исправления данных нет | `TestSchemaDriftFailsCheckAndUpWithoutRepair` — 11 вариантов |
+| Версия есть, но схема изменилась | Новый Check и повторный up завершаются ошибкой; автоматического удаления или исправления данных нет | `TestSchemaDriftFailsCheckAndUpWithoutRepair` — 11 вариантов |
 | В search_path несколько схем; есть временные одноимённые таблицы | Работа ведётся только с выбранной постоянной схемой; миграции не заимствуют чужие таблицы | `TestSearchPathDoesNotBorrowSchemaFromLaterEntry`, `TestTemporaryTablesCannotShadowMigrationTargets` |
 | Целевая таблица или схема удалена, соединение переподключилось | Репозиторий не переключается на записи следующей схемы или temp-таблицы; проверка готовности отклоняет несовместимую схему | `TestRuntimeNeverFallsBackAfterTargetDisappears` |
 | Миграция удерживает advisory lock | Readiness ждёт в рамках deadline, после отката снова проходит | `TestReadinessWaitsForMigrationLockWithinDeadline` |
-| У runtime-роли отозван INSERT или UPDATE | Готовность отклоняется; после восстановления прав проверка и создание работают | `TestReadinessRejectsMissingRuntimePrivileges` |
+| У runtime-роли отозван INSERT или UPDATE | Новая проверка готовности отклоняется; после восстановления прав проверка и создание работают. HTTP-кеш обновляется после TTL | `TestReadinessRejectsMissingRuntimePrivileges` |
 | Runtime-роль не существует при up | Схема применена, выдача прав не выполнена; ошибка явно описывает состояние. После создания роли повторный up выдаёт права | `TestRuntimeGrantsUseTargetSchemaAndRecoverAfterMissingRole`, `deploy-check` |
 | Нестандартная схема или кавычка в имени роли | Идентификаторы корректно экранируются; права выдаются выбранной схеме; владельца нельзя выдать за ограниченную runtime-роль | `TestRuntimeGrantsUseTargetSchemaAndRecoverAfterMissingRole` |
 

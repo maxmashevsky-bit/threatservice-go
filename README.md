@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/maxmashevsky-bit/threatservice-go/actions/workflows/ci.yml/badge.svg)](https://github.com/maxmashevsky-bit/threatservice-go/actions/workflows/ci.yml)
 
-Выполнено. REST-сервис на Go для хранения сведений об угрозах по MD5. Реализованы три операции исходного задания: создание, чтение и полная замена существующей записи.
+Выполнено. REST-сервис на Go и PostgreSQL для обмена сведениями об угрозах по MD5: создание, чтение и полная замена существующей записи.
 
 ## Быстрый запуск
 
-Нужны Docker и Docker Compose v2. Клонируйте проект в полный путь без кириллицы:
+Нужны Docker и Docker Compose v2. Используйте полный путь без кириллицы:
 
 ```sh
 git clone https://github.com/maxmashevsky-bit/threatservice-go.git "$HOME/threatservice-go"
@@ -17,148 +17,63 @@ docker compose logs migrate
 curl --fail http://localhost:8080/health/ready
 ```
 
-Для сдачи задания также подготовлен архив `Машевский_Максим_Go.zip` с каталогом `threatservice`. Его можно распаковать в ASCII-путь, например `~/threatservice`, и выполнить те же команды начиная с `cp .env.example .env`.
+Compose поднимает PostgreSQL 18, создаёт runtime-роль, применяет миграцию и запускает приложение на `127.0.0.1:8080`. Порт БД наружу не опубликован. `docker compose down` сохраняет данные в именованном томе. Dev-пароли и отключённая авторизация подходят только для локального запуска; настройка паролей и TLS описана в [сопровождении](docs/operations.md).
 
-Compose запускает PostgreSQL 18, создаёт отдельную роль приложения, выполняет миграции и только после их успешного завершения запускает сервер. HTTP доступен на `127.0.0.1:8080`; порт PostgreSQL наружу не опубликован. Данные сохраняются в именованном томе.
+Для сдачи задания предусмотрен архив `Машевский_Максим_Go.zip` с каталогом `threatservice`; после распаковки команды те же, начиная с `cp .env.example .env`.
 
-Если Docker BuildKit сообщает об ошибке `x-docker-expose-session-sharedkey` с `non-ASCII`, перенесите проект в полный путь без кириллицы и повторите сборку. Это ограничение передачи build-session в Docker, а не ошибка сервиса; ASCII-имя самого каталога не помогает, если кириллица осталась в родительском пути.
-
-Значения паролей по умолчанию предназначены только для локального запуска. Для другого окружения задайте собственные пароли в `.env`, включите доступ по токену и TLS. `.env` не входит в Git и Docker-контекст. Compose передаёт пароль отдельно через `PGPASSWORD`: символы `@`, `:`, `/`, `%`, `$` и пробелы не требуют URL-кодирования. В `.env` заключайте пароль в одинарные кавычки, чтобы Compose сохранил буквальный `$`; одинарная кавычка внутри такого значения записывается как `\'`. Явно пустые пароли отклоняются при инициализации БД, а не заменяются dev-значением. Существующий том сохраняет прежние пароли: изменение `.env` само по себе не меняет роли БД.
+## API
 
 ```sh
-docker compose logs -f app
-docker compose down       # остановить, сохранив данные
-```
+# Создать: 201, Location и шесть полей записи
+curl -i http://localhost:8080/info -H 'Content-Type: application/json' \
+  --data '{"md5":"0123456789ABCDEF0123456789ABCDEF","name":"Trojan.Win32.Generic","description":"Описание угрозы","severity":"high"}'
 
-## Примеры API
-
-Создать запись:
-
-```sh
-curl -i http://localhost:8080/info \
-  -H 'Content-Type: application/json' \
-  --data '{"md5":"0123456789ABCDEF0123456789ABCDEF","name":"Trojan.Win32.Generic","description":"Получает команды с удалённого узла","severity":"high"}'
-```
-
-Ожидается `201 Created`, заголовок `Location: /info/0123456789abcdef0123456789abcdef` и объект с полями `md5`, `name`, `description`, `severity`, `created_at`, `updated_at`.
-
-Получить запись:
-
-```sh
+# Получить: 200 или 404
 curl -i http://localhost:8080/info/0123456789abcdef0123456789abcdef
-```
 
-Заменить изменяемые поля:
-
-```sh
+# Полностью заменить изменяемые поля существующей записи: 200 или 404
 curl -i -X PUT http://localhost:8080/info/0123456789abcdef0123456789abcdef \
-  -H 'Content-Type: application/json' \
-  --data '{"name":"Trojan.Win32.Updated","description":"Уточнённое описание","severity":"critical"}'
+  -H 'Content-Type: application/json' --data '{"name":"Trojan.Win32.Updated"}'
 ```
 
-`PUT` работает только для существующей записи. Пропущенные `description` и `severity` получают `""` и `unknown`, в том числе при замене. Повтор одинакового `PUT` не меняет `updated_at`. Повтор `POST` того же MD5 возвращает `409`. MD5 допускает оба регистра и хранится в нижнем.
+MD5 хранится в нижнем регистре. Повторное создание возвращает `409`. В PUT пропущенные description и severity сбрасываются в `""` и `unknown`; повтор одинакового PUT сохраняет updated_at. Ответ содержит md5, name, description, severity, created_at и updated_at. JSON обрабатывается строго: неизвестные и повторные поля, null и неверный Unicode отклоняются; максимальное тело — 65 536 байт.
 
-Полный контракт: [`api/openapi.yaml`](api/openapi.yaml). Решения и ограничения: [`docs/architecture.md`](docs/architecture.md). Фактические результаты запуска и тестов: [`docs/verification.md`](docs/verification.md). Матрица ошибочных ситуаций: [`docs/error-scenarios.md`](docs/error-scenarios.md).
+Полный контракт: [OpenAPI](api/openapi.yaml). Внутренние ошибки возвращают безопасный `500`, проверка неготовности — `503`; причины сохраняются в серверных ERROR-логах и связываются с ответом через X-Request-ID.
 
-| Статус | Условие |
-| --- | --- |
-| `400` | Невалидный MD5, JSON или поле |
-| `401` | Нет корректного Bearer-токена, если включён `API_TOKEN` |
-| `404` | Запись либо маршрут отсутствует |
-| `405` | Метод не разрешён; ответ содержит `Allow` |
-| `409` | MD5 уже существует |
-| `413` | Тело запроса больше 65 536 байт |
-| `415` | Не поддерживается тип содержимого либо его сжатие |
-| `429` | Исчерпан лимит бизнес-API либо отдельный лимит `/health/ready` |
-| `500` | Ошибка хранилища, внутренний deadline или другая серверная ошибка |
-| `503` | `/health/ready`: БД недоступна |
+`/health/live` не обращается к БД. `/health/ready` кеширует результат на 1 секунду и объединяет одновременные проверки: частота опроса не вызывает `429`. Бизнес-API имеет отдельный настраиваемый rate limit.
 
-Ответ ошибки содержит `message` и, при необходимости, безопасное `details`. SQL, пароли и стек клиенту не передаются. JSON разбирается строго: лишние и повторные поля, `null`, неправильный регистр имён полей и несколько объектов в одном теле запрещены. Проверяются границы Unicode-строк и отсутствие NUL. GET не изменяет состояние.
-
-## Настройки
+## Основные настройки
 
 | Переменная | По умолчанию | Назначение |
 | --- | --- | --- |
-| `DATABASE_URL` | обязательна | DSN PostgreSQL для сервера или мигратора |
-| `HTTP_ADDR` | `:8080` | Адрес HTTP-сервера |
-| `PG_MAX_CONNS` | `10` | Максимум соединений пула |
-| `REQUEST_TIMEOUT` | `3s` | Срок обработки запроса |
-| `QUERY_TIMEOUT` | `2s` | Срок обращения к БД |
-| `SHUTDOWN_TIMEOUT` | `10s` | Ожидание текущих запросов при остановке |
-| `API_TOKEN` | пусто | Общий Bearer-токен: от 16 до 1024 ASCII-символов token68; пусто — доступ без авторизации |
-| `RATE_LIMIT_RPS` | `0` | Общий лимит запросов в секунду; `0` отключает |
-| `RATE_LIMIT_BURST` | `20` | Вместимость token bucket |
-| `TLS_CERT_FILE` | пусто | Путь к PEM-сертификату внутри контейнера/процесса |
-| `TLS_KEY_FILE` | пусто | Путь к PEM-ключу; задаётся вместе с сертификатом |
+| DATABASE_URL | обязательна | DSN PostgreSQL |
+| HTTP_ADDR | `:8080` | Адрес сервера |
+| PG_MAX_CONNS | `10` | Размер пула |
+| REQUEST_TIMEOUT | `3s` | Deadline запроса |
+| QUERY_TIMEOUT | `2s` | Deadline SQL, включая ожидание пула |
+| SHUTDOWN_TIMEOUT | `10s` | Время корректной остановки |
+| API_TOKEN | пусто | Bearer token68, 16–1024 ASCII-символа; пусто отключает авторизацию |
+| RATE_LIMIT_RPS | `0` | Общий лимит бизнес-API на процесс; 0 отключает |
+| RATE_LIMIT_BURST | `20` | Burst бизнес-лимитера |
+| TLS_CERT_FILE / TLS_KEY_FILE | пусто | Пара PEM-файлов для HTTPS |
 
-При отмене SQL-действия драйвер ожидает подтверждения отмены; на это допускается до 250 мс сверх истёкшего query deadline. При проблемах сети результат записи может быть неопределённым: после ошибки проверьте текущее состояние через GET. Это не позволяет доказать, какой из конкурентных запросов выполнил запись; автоматического повтора записи нет.
+Compose также использует POSTGRES_PASSWORD и APP_DB_PASSWORD из `.env`. Если включён API_TOKEN, передавайте `Authorization: Bearer <token>` для `/info` и `/info/{md5}`. Health-маршруты доступны без токена.
 
-Compose дополнительно читает `POSTGRES_PASSWORD` и `APP_DB_PASSWORD` из `.env` и передаёт соответствующий пароль серверу/мигратору через `PGPASSWORD`. Это стандартный fallback драйвера pgx для `DATABASE_URL` без пароля. Сервер работает под ролью `threat_app`, имеющей только чтение, создание и обновление записей. Мигратор подключается ролью `threat_owner`; сервер не выполняет DDL при запуске, а проверяет совместимость схемы.
+## Проверки
 
-При `API_TOKEN` каждый запрос к `/info` и `/info/{md5}` должен содержать `Authorization: Bearer <token>`. Для `curl` добавьте `-H "Authorization: Bearer $API_TOKEN"`. Проверки `/health/live` и `/health/ready` доступны без токена. Health-эндпоинты не раскрывают параметры подключения.
-
-Лимит бизнес-запросов общий на процесс, а не на IP: доверие к клиентскому `X-Forwarded-For` не требуется. В нескольких репликах лимиты независимы. `/health/live` не ограничен. Для `/health/ready` всегда действует отдельный фиксированный лимит: 1 запрос в секунду, burst 2; при его исчерпании ответ — `429`. Health-запросы не расходуют лимит бизнес-API, а бизнес-запросы не расходуют лимит readiness. Для периодической readiness-проверки достаточно интервала 2 секунды.
-
-Для встроенного TLS смонтируйте сертификат и ключ read-only, задав пути `TLS_CERT_FILE` и `TLS_KEY_FILE`. Например, сохраните следующий дополнительный Compose-файл как `compose.tls.yaml` и запускайте с `docker compose -f compose.yaml -f compose.tls.yaml up --build -d`:
-
-```yaml
-services:
-  app:
-    environment:
-      TLS_CERT_FILE: /run/tls/server.crt
-      TLS_KEY_FILE: /run/tls/server.key
-    volumes:
-      - ./certs/server.crt:/run/tls/server.crt:ro
-      - ./certs/server.key:/run/tls/server.key:ro
-```
-
-Файлы должны читаться UID `65532`, под которым работает контейнер. Используйте `https://localhost:8080` и сертификат с подходящим SAN. Для собственного CA передайте `curl --cacert <ca.crt>`. Сертификаты и ключи в архив не включены. Встроенный TLS защищает клиентский HTTP; соединение с БД в локальном Compose идёт по закрытой сети с `sslmode=disable`. Для внешней БД задавайте отдельный DSN с проверкой сертификата (`sslmode=verify-full`).
-
-## Разработка и проверки
-
-Нужны Go 1.27.3 и PostgreSQL 18. Пример запуска без Docker при уже подготовленной БД:
+Нужны Go 1.27.3; для integration — отдельная PostgreSQL 18 и роль с DDL/CREATEROLE.
 
 ```sh
-export DATABASE_URL='postgres://threat_owner:password@localhost:5432/threats?sslmode=disable'
-go run ./cmd/migrate -app-role=threat_app up
-export DATABASE_URL='postgres://threat_app:password@localhost:5432/threats?sslmode=disable'
-go run ./cmd/server
+make generate-check   # DTO соответствуют спецификации
+make vet
+make test             # unit, HTTP и OpenAPI-контрактные тесты
+make race
+TEST_DATABASE_URL='postgres://.../threats_test?...' make integration
+make build
+make vuln
+make deploy-check     # Docker, Compose, Python 3 и OpenSSL
 ```
 
-Для локального примера роли и БД нужно создать заранее. Если роль приложения не используется, опустите `-app-role`; для постоянной эксплуатации отдельная роль предпочтительна.
+Контрактные тесты используют закреплённый kin-openapi v0.142.0 и httptest: проверяют запросы, статусы, Content-Type, заголовки и JSON ответа для POST/GET/PUT. Они входят в `make test`, `make race` и CI. Неверные запросы проверяются на ожидаемый отказ; строгий JSON дополнительно покрыт отдельными тестами. Дополнительные команды: `make fuzz`, `make smoke`, `make generate`.
 
-```sh
-make test             # unit- и HTTP-тесты
-make vet              # статическая проверка
-make vuln             # govulncheck по актуальной базе Go
-make race             # те же тесты с детектором гонок
-make generate-check   # generated types соответствуют OpenAPI
-make fuzz             # по 20 секунд мутаций JSON и MD5
-make build            # bin/server и bin/migrate
-```
-
-Интеграционные тесты работают с настоящим PostgreSQL и проверяют SQL, миграции и конкурентные операции. Используйте отдельную тестовую БД и роль с правами DDL. Для проверок выдачи и отзыва прав нужна также CREATEROLE; без неё только эти сценарии пропускаются. Каждый тест создаёт собственную случайную схему и удаляет только её:
-
-```sh
-export TEST_DATABASE_URL='postgres://threat_owner:password@localhost:5432/threats_test?sslmode=disable'
-make integration
-```
-
-Для проверки уже запущенного экземпляра есть `make smoke` (нужен Python 3). Скрипт создаёт запись со случайным MD5 и оставляет её в БД: удаления в исходном API нет. Для другой точки входа используйте `BASE_URL=https://example.test API_TOKEN=... make smoke`.
-
-`make deploy-check` проверяет Docker-развёртывание с отдельным случайным Compose project в ASCII-каталоге `/tmp`: специальные символы в паролях, повторный запуск со сборкой, сохранность данных, недоступность и восстановление БД, Bearer/rate limit, ошибки конфигурации и CLI, nonroot/TLS и отказ bootstrap при пустом пароле. Нужны Docker, Compose, Python 3 и OpenSSL. Проверка удаляет только свои контейнеры, том и временный каталог; существующие Compose-проекты не использует. Секреты не печатаются.
-
-Типы запросов и ответов сгенерированы `oapi-codegen v2.8.0` из OpenAPI и включены в исходники. `make generate` обновляет их; генератор закреплён по версии и не нужен для обычной сборки. HTTP-обработка реализована вручную, чтобы явно контролировать строгий JSON, ограничения размера и статусы. CI настроен на проверку генерации, vet, govulncheck, unit/race, интеграционные тесты на PostgreSQL 18, сборку бинарей и `deploy-check`.
-
-## Миграции и сопровождение
-
-```sh
-docker compose run --rm migrate status
-docker compose run --rm migrate -app-role=threat_app up
-```
-
-Миграции встроены в бинарь. CLI также поддерживает `down`; он удаляет таблицу угроз и все её данные и требует явного `ALLOW_DESTRUCTIVE_MIGRATION=1`. Не выполняйте его на рабочей БД без резервной копии. Параметры CLI указываются перед `up`, `down` или `status`. `-app-role` допустим только с `up`: роль должна уже существовать, не владеть таблицами и не иметь административных привилегий. Выдача прав выполняется отдельной транзакцией после миграции; если роль отсутствует, схема остаётся применённой. Создайте или исправьте роль и повторите `docker compose run --rm migrate -app-role=threat_app up`.
-
-JSON-логи пишутся в stdout; запросы связываются через `X-Request-ID`. Для мониторинга доступны `/health/live` (процесс отвечает) и `/health/ready` (готовность обслуживать запросы с БД, отдельный лимит описан выше). Остановку обрабатывает `SIGTERM`: сервер перестаёт принимать новые соединения и ждёт текущие запросы в пределах `SHUTDOWN_TIMEOUT`. По умолчанию это 10 секунд, а Compose даёт процессу 15 секунд на завершение. При увеличении `SHUTDOWN_TIMEOUT` увеличьте `stop_grace_period` в Compose с запасом сверх этого срока, чтобы Docker не прервал корректное завершение.
-
-Сервис хранит сведения клиента и не сканирует файлы. Отсутствие MD5 в базе не доказывает безопасность файла; MD5 используется как ключ исходного контракта и не защищает от коллизий. Список записей, удаление, пользователи, история изменений и распределённый rate limit в объём задания не добавлены.
+[Архитектура и ограничения схемы](docs/architecture.md) · [Сопровождение и диагностика](docs/operations.md) · [Матрица ошибок](docs/error-scenarios.md) · [Результаты проверок](docs/verification.md).

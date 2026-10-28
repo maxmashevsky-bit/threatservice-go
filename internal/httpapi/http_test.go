@@ -323,30 +323,32 @@ func TestOptionalAuthenticationRateLimitAndHealth(t *testing.T) {
 		}
 	}
 	notReady.Store(true)
+	// Expire the cache explicitly here; real TTL behavior is tested separately.
+	cache := &h.(*handler).readiness
+	cache.mu.Lock()
+	cache.expires = time.Time{}
+	cache.mu.Unlock()
 	w := request(h, "GET", "/health/ready", "")
 	if w.Code != 503 || strings.Contains(w.Body.String(), "DSN") {
 		t.Fatalf("ready: %d %s", w.Code, w.Body)
 	}
 }
 
-func TestReadinessHasAnIndependentBoundedLimiter(t *testing.T) {
+func TestReadinessCacheIsIndependentOfBusinessLimiter(t *testing.T) {
 	var readyCalls atomic.Int64
 	options := testOptions()
 	options.RateLimitRPS = 0.001
 	options.RateLimitBurst = 1
 	options.Ready = func(context.Context) error { readyCalls.Add(1); return nil }
 	h := New(threat.NewService(&testRepository{}), options)
-	for i, status := range []int{200, 200, 429} {
+	for i := 0; i < 20; i++ {
 		w := request(h, "GET", "/health/ready", "")
-		if w.Code != status {
-			t.Fatalf("readiness request %d: status=%d", i, w.Code)
-		}
-		if status == 429 && w.Header().Get("Retry-After") != "1" {
-			t.Fatalf("Retry-After=%q", w.Header().Get("Retry-After"))
+		if w.Code != 200 || w.Header().Get("Retry-After") != "" {
+			t.Fatalf("readiness request %d: status=%d headers=%v", i, w.Code, w.Header())
 		}
 	}
-	if readyCalls.Load() != 2 {
-		t.Fatalf("Ready invoked %d times; expected 2", readyCalls.Load())
+	if readyCalls.Load() != 1 {
+		t.Fatalf("Ready invoked %d times; expected one cached check", readyCalls.Load())
 	}
 	if w := request(h, "GET", "/info/"+hash, ""); w.Code != 200 {
 		t.Fatalf("readiness consumed business quota: %d", w.Code)
@@ -359,8 +361,7 @@ func TestReadinessHasAnIndependentBoundedLimiter(t *testing.T) {
 			t.Fatalf("liveness was limited: %d", w.Code)
 		}
 	}
-	// A fresh instance has its own readiness quota even after its business
-	// quota is exhausted.
+	// Even an exhausted business quota must not prevent a fresh DB check.
 	h = New(threat.NewService(&testRepository{}), options)
 	request(h, "GET", "/info/"+hash, "")
 	request(h, "GET", "/info/"+hash, "")
@@ -387,9 +388,14 @@ func TestRecoveryAndLogsAreSafe(t *testing.T) {
 	if w.Code != 500 || strings.Contains(w.Body.String(), "private") {
 		t.Fatalf("response=%d %s", w.Code, w.Body)
 	}
-	var entry map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
-		t.Fatal(err)
+	entries := logEvents(t, &logs)
+	if len(entries) != 2 {
+		t.Fatalf("events=%v", entries)
+	}
+	failure, entry := entries[0], entries[1]
+	stack, _ := failure["stack"].(string)
+	if failure["level"] != "ERROR" || failure["cause_category"] != "panic" || failure["operation"] != "get_threat" || failure["request_id"] != w.Header().Get("X-Request-ID") || !strings.Contains(stack, "panicService.GetByMD5") || !strings.Contains(stack, "http_test.go:") {
+		t.Fatalf("missing panic diagnostic: %v", failure)
 	}
 	if entry["request_id"] != w.Header().Get("X-Request-ID") || entry["error_class"] != "panic" || entry["route"] != "/info/{md5}" || strings.Contains(logs.String(), hash) || strings.Contains(logs.String(), "private") {
 		t.Fatalf("unsafe log: %s", logs.String())
