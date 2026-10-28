@@ -372,12 +372,14 @@ func TestReadinessCacheIsIndependentOfBusinessLimiter(t *testing.T) {
 
 type panicService struct{}
 
+const panicPayload = "private panic"
+
 func (panicService) Create(context.Context, string, threat.Input) (threat.Threat, error) {
-	panic("private panic")
+	panic(panicPayload)
 }
-func (panicService) GetByMD5(context.Context, string) (threat.Threat, error) { panic("private panic") }
+func (panicService) GetByMD5(context.Context, string) (threat.Threat, error) { panic(panicPayload) }
 func (panicService) Replace(context.Context, string, threat.Input) (threat.Threat, error) {
-	panic("private panic")
+	panic(panicPayload)
 }
 
 func TestRecoveryAndLogsAreSafe(t *testing.T) {
@@ -397,7 +399,7 @@ func TestRecoveryAndLogsAreSafe(t *testing.T) {
 	if failure["level"] != "ERROR" || failure["cause_category"] != "panic" || failure["operation"] != "get_threat" || failure["request_id"] != w.Header().Get("X-Request-ID") || !strings.Contains(stack, "panicService.GetByMD5") || !strings.Contains(stack, "http_test.go:") {
 		t.Fatalf("missing panic diagnostic: %v", failure)
 	}
-	if entry["request_id"] != w.Header().Get("X-Request-ID") || entry["error_class"] != "panic" || entry["route"] != "/info/{md5}" || strings.Contains(logs.String(), hash) || strings.Contains(logs.String(), "private") {
+	if entry["request_id"] != w.Header().Get("X-Request-ID") || entry["error_class"] != "panic" || entry["route"] != "/info/{md5}" || strings.Contains(logs.String(), hash) || strings.Contains(logs.String(), panicPayload) {
 		t.Fatalf("unsafe log: %s", logs.String())
 	}
 }
