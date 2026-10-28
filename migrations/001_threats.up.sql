@@ -14,7 +14,3 @@ CREATE TABLE threats (
         CHECK (severity IN ('unknown', 'low', 'medium', 'high', 'critical')),
     CONSTRAINT threats_timestamp_order CHECK (updated_at >= created_at)
 );
-
-COMMENT ON TABLE threats IS 'Current client-provided threat information keyed by MD5';
-COMMENT ON COLUMN threats.severity IS 'Client assessment; unknown is not a safe-file verdict';
-COMMENT ON COLUMN threats.updated_at IS 'Last data change time; not a concurrency version';

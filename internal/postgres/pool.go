@@ -12,10 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ConfigurePool asks a reachable server to acknowledge query cancellation before
-// falling back to a connection deadline. A failed connection can still leave the
-// outcome of a write unknown; callers must never retry writes automatically.
-// Call this before pgxpool.NewWithConfig, for application and test pools alike.
 func ConfigurePool(config *pgxpool.Config) {
 	config.ConnConfig.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
 		return &pgconn.CancelRequestContextWatcherHandler{
@@ -38,8 +34,6 @@ func ConfigurePool(config *pgxpool.Config) {
 		if err := connection.QueryRow(ctx, `SELECT current_user, pg_catalog.current_schema()`).Scan(&user, &schema); err != nil {
 			return fmt.Errorf("resolve application schema: %w", err)
 		}
-		// Config copies may intentionally choose another search_path. Within one
-		// configuration, reconnecting must never switch to a fallback schema.
 		key := connection.Config().Database + "\x00" + user + "\x00" + connection.Config().RuntimeParams["search_path"]
 		mu.Lock()
 		target, exists := targets[key]

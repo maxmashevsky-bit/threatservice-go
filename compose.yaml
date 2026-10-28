@@ -4,14 +4,12 @@ services:
     environment:
       POSTGRES_DB: threats
       POSTGRES_USER: threat_owner
-      # Local-development defaults only. Override both passwords in .env.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD-dev-owner-change-me}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD-dev-app-change-me}
     volumes:
       - pgdata:/var/lib/postgresql
       - ./deploy/postgres/10-app-role.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
     healthcheck:
-      # TCP stays closed while the official image runs its temporary init server.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U threat_owner -d threats"]
       interval: 2s
       timeout: 3s

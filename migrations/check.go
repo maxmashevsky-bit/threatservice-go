@@ -10,8 +10,6 @@ type column struct {
 	name, sqlType, defaultSQL string
 }
 
-// The ledger is not a substitute for checking the objects the service actually
-// uses. Fail closed on schema drift; never repair or delete operator data here.
 func checkSchema(ctx context.Context, q querier) error {
 	ledger := []column{{"version", "bigint", ""}, {"applied_at", "timestamp with time zone", "CURRENT_TIMESTAMP"}}
 	if _, err := checkTable(ctx, q, "schema_migrations", ledger); err != nil {
@@ -52,8 +50,6 @@ func checkSchema(ctx context.Context, q querier) error {
 	if !canRead || !canInsert || !canUpdate {
 		return fmt.Errorf("current role requires SELECT, INSERT and UPDATE on threats")
 	}
-	// Check their identity, validation state and referenced columns, rather than
-	// comparing PostgreSQL's version-dependent pretty-printed SQL text.
 	expected := map[string][]int16{
 		"threats_md5_format":         {1},
 		"threats_name_length":        {2},

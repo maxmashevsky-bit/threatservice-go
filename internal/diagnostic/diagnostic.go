@@ -1,4 +1,3 @@
-// Package diagnostic extracts allowlisted metadata without formatting errors.
 package diagnostic
 
 import (
@@ -13,8 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Cause never includes error messages, PostgreSQL detail fields or connection
-// configuration. A network error alone does not prove a database outage.
 func Cause(err error) (category, sqlstate string) {
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) && validSQLState(pg.Code) {
@@ -53,8 +50,6 @@ func validSQLState(code string) bool {
 	return true
 }
 
-// Log returns the category also used by the request-completion event.
-// operation must be a constant defined by the caller, never a URL or SQL string.
 func Log(logger *slog.Logger, requestID, operation string, err error) string {
 	category, sqlstate := Cause(err)
 	attrs := []any{"operation", operation, "cause_category", category}
@@ -68,8 +63,6 @@ func Log(logger *slog.Logger, requestID, operation string, err error) string {
 	return category
 }
 
-// PanicStack records symbols and source locations, without argument values or
-// the panic payload. runtime/debug.Stack also prints raw argument words.
 func PanicStack() string {
 	var pcs [64]uintptr
 	n := runtime.Callers(2, pcs[:])

@@ -1,4 +1,3 @@
-// Package config reads and validates process configuration without logging secrets.
 package config
 
 import (
@@ -24,9 +23,8 @@ type Config struct {
 	TLSKeyFile      string
 }
 
-func Load() (Config, error) { return load(os.Getenv) }
-
-func load(get func(string) string) (Config, error) {
+func Load() (Config, error) {
+	get := os.Getenv
 	c := Config{HTTPAddr: ":8080", DatabaseURL: get("DATABASE_URL"), PGMaxConns: 10,
 		RequestTimeout: 3 * time.Second, QueryTimeout: 2 * time.Second, ShutdownTimeout: 10 * time.Second,
 		APIToken: get("API_TOKEN"), RateLimitBurst: 20, TLSCertFile: get("TLS_CERT_FILE"), TLSKeyFile: get("TLS_KEY_FILE")}
@@ -63,8 +61,6 @@ func load(get func(string) string) (Config, error) {
 	if c.QueryTimeout > c.RequestTimeout {
 		return c, fmt.Errorf("QUERY_TIMEOUT must not exceed REQUEST_TIMEOUT")
 	}
-	// The HTTP write deadline reserves ten seconds beyond the request budget.
-	// Reject overflow instead of silently disabling WriteTimeout with a negative value.
 	if c.RequestTimeout > time.Duration(math.MaxInt64)-10*time.Second {
 		return c, fmt.Errorf("REQUEST_TIMEOUT is too large for the HTTP write deadline")
 	}
